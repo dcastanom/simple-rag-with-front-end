@@ -2,6 +2,10 @@
 let chatHistory = [];
 let hasDocuments = false;
 
+/* ── Constants ───────────────────────────────────────────────── */
+/** Maximum number of question/answer pairs kept in the rolling history sent to the API. */
+const MAX_HISTORY = 10;
+
 /* DOM refs */
 const chatMessages   = document.getElementById('chatMessages');
 const chatForm       = document.getElementById('chatForm');
@@ -15,6 +19,17 @@ const progressFill   = document.getElementById('progressFill');
 const progressText   = document.getElementById('progressText');
 const documentList   = document.getElementById('documentList');
 const emptyDocs      = document.getElementById('emptyDocs');
+
+/* ── API helpers ─────────────────────────────────────────────── */
+/**
+ * Extracts a human-readable error message from a non-OK fetch Response.
+ * Tries to read the JSON body's `detail` field (FastAPI convention),
+ * falling back to the HTTP status code.
+ */
+async function apiErrorMessage(res) {
+  const body = await res.json().catch(() => ({}));
+  return body.detail || `HTTP ${res.status}`;
+}
 
 /* ── Bootstrap ───────────────────────────────────────────────── */
 loadDocuments();
@@ -66,8 +81,7 @@ async function uploadFile(file) {
     clearInterval(timer);
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${res.status}`);
+      throw new Error(await apiErrorMessage(res));
     }
 
     setProgress(100);
@@ -135,8 +149,7 @@ async function deleteDocument(id, filename) {
   try {
     const res = await fetch(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${res.status}`);
+      throw new Error(await apiErrorMessage(res));
     }
     await loadDocuments();
   } catch (err) {
@@ -170,15 +183,14 @@ chatForm.addEventListener('submit', async (e) => {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${res.status}`);
+      throw new Error(await apiErrorMessage(res));
     }
 
     const data = await res.json();
     removeLoader(loaderId);
     appendMessage('bot', data.answer, data.sources);
     chatHistory.push({ question, answer: data.answer });
-    if (chatHistory.length > 10) chatHistory.shift();
+    if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
   } catch (err) {
     removeLoader(loaderId);
     appendMessage('error', `Error: ${err.message}`);

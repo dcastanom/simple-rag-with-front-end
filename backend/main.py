@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -13,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 from rag import RAGSystem  # noqa: E402 – must come after load_dotenv
 
@@ -135,8 +138,9 @@ def delete_document(doc_id: str):
 
     try:
         rag.delete_document(doc_id)
-    except Exception:
-        pass  # Best-effort vector deletion
+    except Exception as exc:
+        # Log but don't fail — the file and metadata will still be removed
+        logger.warning("Vector deletion failed for doc %s: %s", doc_id, exc)
 
     file_path = Path(doc["path"])
     if file_path.exists():

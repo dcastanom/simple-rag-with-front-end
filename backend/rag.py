@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import List
@@ -11,6 +12,13 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 CHROMA_DIR = Path("chroma_db")
+
+# Number of leading characters used as the deduplication key for retrieved chunks.
+# 80 chars is enough to distinguish different passages while being shorter than a
+# full chunk (1000 chars), so near-duplicate passages are collapsed.
+_DEDUP_KEY_LEN = 80
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant that answers questions based on the provided context.\n"
@@ -115,7 +123,7 @@ class RAGSystem:
         sources = []
         seen: set = set()
         for doc in source_docs:
-            key = (doc.metadata.get("filename", ""), doc.page_content[:80])
+            key = (doc.metadata.get("filename", ""), doc.page_content[:_DEDUP_KEY_LEN])
             if key in seen:
                 continue
             seen.add(key)

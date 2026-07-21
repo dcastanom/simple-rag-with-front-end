@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simple RAG</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h1>📚 Simple RAG</h1>
+        <p class="sidebar-subtitle">Chat with your documents</p>
+      </div>
+
+      <section class="upload-section">
+        <h2 class="section-title">Documents</h2>
+
+        <div class="upload-area" id="uploadArea">
+          <div class="upload-icon">📄</div>
+          <p class="upload-label">Drop files here</p>
+          <button type="button" class="btn btn-outline" id="browseBtn">Browse files</button>
+          <p class="upload-hint">PDF · TXT · MD (max 50 MB)</p>
+        </div>
+        <input type="file" id="fileInput" accept=".pdf,.txt,.md" multiple hidden />
+
+        <div class="upload-progress" id="uploadProgress" hidden>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <span class="progress-text" id="progressText">Uploading…</span>
+        </div>
+      </section>
+
+      <div class="document-list" id="documentList">
+        <p class="empty-docs" id="emptyDocs">No documents yet</p>
+      </div>
+    </aside>
+
+    <!-- Chat area -->
+    <main class="chat-area">
+      <div class="chat-messages" id="chatMessages">
+        <div class="welcome" id="welcomeMsg">
+          <div class="welcome-icon">🤖</div>
+          <h2>Welcome to Simple RAG</h2>
+          <p>Upload one or more documents using the sidebar, then ask questions about their content.</p>
+          <ul class="examples">
+            <li>"What is this document about?"</li>
+            <li>"Summarise the key points."</li>
+            <li>"What does it say about [topic]?"</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chat-input-wrapper">
+        <form class="chat-form" id="chatForm" autocomplete="off">
+          <input
+            type="text"
+            id="questionInput"
+            class="chat-input"
+            placeholder="Ask a question about your documents…"
+          />
+          <button type="submit" class="btn btn-primary" id="sendBtn" disabled>
+            <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M2 21 23 12 2 3v7l15 2-15 2v7z" />
+            </svg>
+            Send
+          </button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

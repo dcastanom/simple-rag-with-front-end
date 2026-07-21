@@ -275,11 +275,25 @@ function removeLoader(id) {
 }
 
 /* ── Helpers ─────────────────────────────────────────────────── */
+/**
+ * Convert plain LLM text to safe HTML with basic markdown-style formatting.
+ *
+ * Security model:
+ *  1. All HTML special characters (&, <, >, ") are escaped first, so raw HTML
+ *     in the LLM response is neutralised before any regex runs.
+ *  2. The markdown patterns then operate on the already-escaped text.
+ *     Every captured group ($1) therefore contains only safe, escaped content —
+ *     injecting it inside <strong>, <em>, or <code> tags cannot introduce XSS.
+ */
 function formatText(text) {
-  return text
+  // Step 1 — escape HTML so the LLM output cannot inject markup.
+  const safe = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  // Step 2 — apply markdown patterns on the already-safe text.
+  return safe
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')

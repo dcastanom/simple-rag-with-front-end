@@ -94,7 +94,7 @@ backend/documents.json
 
 ## How it works
 
-1. **Upload** — The document is split into overlapping chunks (1 000 chars, 200 overlap), each chunk is embedded with `text-embedding-ada-002`, and stored in a local ChromaDB collection.
+1. **Upload** — The document is split into overlapping chunks (1,000 chars, 200 overlap), each chunk is embedded with `text-embedding-ada-002`, and stored in a local ChromaDB collection.
 2. **Query** — Your question is embedded and the top-4 most similar chunks are retrieved.  The question + context are sent to GPT (default `gpt-3.5-turbo`) which generates a grounded answer.
 3. **Sources** — The retrieved passages are shown below the answer so you can verify the information.
 

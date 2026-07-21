@@ -1,8 +1,10 @@
 # RAG Chat frontend
 
 React + TypeScript SPA for the `rag-pdf-gemini-node` backend. Upload a PDF,
-ask questions about it, and keep a running history of what you've asked
-(persisted for the browser session, cleared when the browser closes).
+manage what you've ingested, ask questions scoped to one document or all of
+them (answers stream in token-by-token), and keep a running history of
+what you've asked (persisted for the browser session, cleared when the
+browser closes).
 
 ## Layers
 
@@ -13,7 +15,7 @@ ask questions about it, and keep a running history of what you've asked
 
 ## Run it
 
-1. Backend must be running first (from the repo root):
+1. Backend must be running first (from `backend/` in the repo root):
    ```
    docker compose up -d
    npm run dev

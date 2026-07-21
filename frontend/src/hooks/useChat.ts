@@ -1,19 +1,11 @@
 import { useCallback, useState } from 'react';
-import { askQuestion } from '../api/chatApi';
-import { ApiError } from '../api/client';
+import { streamQuestion } from '../api/chatApi';
 import type { ChatResponse } from '../types';
 
 interface ChatState {
   loading: boolean;
   error: string | null;
   lastAnswer: ChatResponse | null;
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.detail ? `${err.message}: ${err.detail}` : err.message;
-  }
-  return 'Something went wrong asking your question.';
 }
 
 export function useChat() {
@@ -23,16 +15,32 @@ export function useChat() {
     lastAnswer: null,
   });
 
-  const ask = useCallback(async (question: string): Promise<ChatResponse | null> => {
-    setState((s) => ({ ...s, loading: true, error: null }));
-    try {
-      const result = await askQuestion(question);
-      setState({ loading: false, error: null, lastAnswer: result });
-      return result;
-    } catch (err) {
-      setState((s) => ({ ...s, loading: false, error: describeError(err) }));
-      return null;
-    }
+  const ask = useCallback(async (question: string, docId: string | null): Promise<ChatResponse | null> => {
+    setState({ loading: true, error: null, lastAnswer: { answer: '', sources: [] } });
+
+    let accumulated = '';
+    let result: ChatResponse | null = null;
+    let errorMessage: string | null = null;
+
+    await streamQuestion(question, docId, {
+      onToken: (text) => {
+        accumulated += text;
+        setState((s) => ({
+          ...s,
+          lastAnswer: { ...(s.lastAnswer ?? { sources: [] }), answer: accumulated },
+        }));
+      },
+      onDone: ({ sources, topSimilarity }) => {
+        result = { answer: accumulated, sources, topSimilarity };
+        setState({ loading: false, error: null, lastAnswer: result });
+      },
+      onError: (message) => {
+        errorMessage = message;
+        setState((s) => ({ ...s, loading: false, error: message }));
+      },
+    });
+
+    return errorMessage ? null : result;
   }, []);
 
   return { loading: state.loading, error: state.error, lastAnswer: state.lastAnswer, ask };

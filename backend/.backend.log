@@ -1,0 +1,6 @@
+◇ injected env (7) from .env // tip: ⌘ suppress logs { quiet: true }
+Database ready
+RAG chatbot running on port 3000
+Processing 20 chunks from "Grafana-Prometheus-Info.pdf"
+Processing 50 chunks from "production-grade-nodejs-architecture-playbook.pdf"
+Processing 36 chunks from "production-grade-react-architecture-playbook.pdf"

@@ -4,6 +4,8 @@ A minimal RAG (Retrieval-Augmented Generation) app: upload PDFs, they get
 chunked and embedded (Gemini) into Postgres/pgvector, then you can ask
 questions and get answers grounded in the ingested content (Groq/Llama).
 
+This project is build based on the https://www.freecodecamp.org/news/how-to-build-rag-chatbot-nodejs-gemini-pgvector/ article. Some improvement proposals made by the article's author and me were made in order to make it adaptable and suitable for production workload. These improvements are listed and explained in the file PRODUCTION-APP_LEVEL-FIXES.md. I also included a react frontend layer with authentication using JWT token.
+
 There are two ways to use it:
 - **The backend API directly** (`curl`, Postman, etc.) — sections 2–5 below.
 - **The web UI** — a React/TypeScript SPA with upload status messages, a

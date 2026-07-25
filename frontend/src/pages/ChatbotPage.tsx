@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useDocumentUpload } from '../hooks/useDocumentUpload';
+import { useDocuments } from '../hooks/useDocuments';
 import { useChat } from '../hooks/useChat';
 import { useHistory } from '../hooks/useHistory';
 import { Header } from '../components/layout/Header';
 import { UploadPanel } from '../components/upload/UploadPanel';
+import { DocumentsPanel } from '../components/documents/DocumentsPanel';
 import { ChatComposer } from '../components/chat/ChatComposer';
 import { AnswerCard } from '../components/chat/AnswerCard';
 import { HistoryList } from '../components/history/HistoryList';
@@ -11,12 +13,19 @@ import type { ChatResponse } from '../types';
 
 export function ChatbotPage() {
   const upload = useDocumentUpload();
+  const documents = useDocuments();
   const chat = useChat();
   const history = useHistory();
   const [lastQuestion, setLastQuestion] = useState<string | null>(null);
 
-  const handleAsk = async (question: string): Promise<ChatResponse | null> => {
-    const result = await chat.ask(question);
+  // Refresh the document list once an upload finishes ingesting, so a
+  // newly ingested file shows up without the user having to reload.
+  useEffect(() => {
+    if (upload.status === 'success') documents.refresh();
+  }, [upload.status, documents.refresh]);
+
+  const handleAsk = async (question: string, docId: string | null): Promise<ChatResponse | null> => {
+    const result = await chat.ask(question, docId);
     if (result) {
       setLastQuestion(question);
       history.add({
@@ -41,7 +50,19 @@ export function ChatbotPage() {
           onDismissMessage={upload.reset}
         />
 
-        <ChatComposer loading={chat.loading} error={chat.error} onAsk={handleAsk} />
+        <DocumentsPanel
+          documents={documents.documents}
+          loading={documents.loading}
+          error={documents.error}
+          onDelete={documents.remove}
+        />
+
+        <ChatComposer
+          loading={chat.loading}
+          error={chat.error}
+          documents={documents.documents}
+          onAsk={handleAsk}
+        />
 
         {chat.lastAnswer && lastQuestion && (
           <AnswerCard answer={chat.lastAnswer} question={lastQuestion} />

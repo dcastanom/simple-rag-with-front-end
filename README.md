@@ -5,9 +5,10 @@ chunked and embedded (Gemini) into Postgres/pgvector, then you can ask
 questions and get answers grounded in the ingested content (Groq/Llama).
 
 There are two ways to use it:
-- **The backend API directly** (`curl`, Postman, etc.) — sections 2–4 below.
+- **The backend API directly** (`curl`, Postman, etc.) — sections 2–5 below.
 - **The web UI** — a React/TypeScript SPA with upload status messages, a
-  question box, and a running history of past Q&A — section 5 below.
+  document list, a question box, and a running history of past Q&A —
+  section 6 below.
 
 Interactive API docs (Swagger UI, generated from JSDoc comments on the
 routes in `backend/src/index.js` / `backend/src/auth/routes.js`) are served
@@ -149,46 +150,79 @@ path itself, only the bytes and the filename. So:
 ## 4. Asking questions
 
 Endpoint: `POST /chat`, JSON body. Requires the `Authorization: Bearer
-<accessToken>` header.
+<accessToken>` header. The response is **streamed** as Server-Sent Events
+rather than one JSON body, so the answer can render token-by-token instead
+of the client waiting for the whole thing:
 
 ```
-curl.exe -X POST http://localhost:3000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <accessToken>" -d "{\"question\": \"What is this document about?\"}"
+curl.exe -N -X POST http://localhost:3000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <accessToken>" -d "{\"question\": \"What is this document about?\"}"
 ```
+(`-N` disables curl's output buffering so you actually see frames arrive
+as they're written, instead of all at once at the end.)
 
 This embeds your question, finds the 5 most similar chunks **among your own
 ingested documents** in Postgres (cosine distance via pgvector's `<=>`
 operator, scoped to `user_id`), and asks Groq's `llama-3.1-8b-instant` to
-answer using only that retrieved context.
+answer using only that retrieved context — streaming each token back as
+it's generated.
 
-Response:
-```json
-{
-  "answer": "...",
-  "sources": ["your-document.pdf"],
-  "topSimilarity": "0.842"
-}
+The stream is a sequence of `event: <name>\ndata: <json>\n\n` frames:
+- `event: token`, repeated — `data` is a JSON-encoded string, one fragment
+  of the answer. Concatenate them in order to get the full answer.
+- `event: done`, once, at the end — `data` is
+  `{ "sources": [...], "topSimilarity": "0.842" }`.
+  - `sources` — de-duplicated list of filenames the answer drew from.
+  - `topSimilarity` — similarity score (0–1) of the single closest chunk;
+    low values (well under ~0.5) usually mean nothing relevant was
+    ingested yet.
+- `event: error`, instead of `done`, if generation fails after streaming
+  had already started — `data` is a JSON-encoded error string.
+
+If no documents match, the stream sends a single `token` frame with "No
+relevant documents found." and a `done` frame with empty `sources`.
+
+Optionally scope the question to one document instead of searching all of
+them, by passing `docId` (the id from `GET /documents`, below):
+```
+curl.exe -N -X POST http://localhost:3000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <accessToken>" -d "{\"question\": \"...\", \"docId\": \"<jobId>\"}"
 ```
 
-- `sources` — de-duplicated list of filenames the answer drew from.
-- `topSimilarity` — similarity score (0–1) of the single closest chunk; low
-  values (well under ~0.5) usually mean nothing relevant was ingested yet.
+Validation errors (missing `question`, malformed `docId`) are returned as
+a normal JSON `400` response, *before* the stream starts — only failures
+that happen mid-generation become an `error` frame instead.
 
-If no documents have been ingested yet, `/chat` returns:
-```json
-{ "answer": "No relevant documents found.", "sources": [] }
-```
+## 5. Managing ingested documents
 
-## 5. Using the web UI (`frontend/`)
+- `GET /documents` — lists your successfully ingested documents, most
+  recent first:
+  ```
+  curl.exe http://localhost:3000/documents -H "Authorization: Bearer <accessToken>"
+  ```
+  ```json
+  [{ "id": "<jobId>", "filename": "your-document.pdf", "chunk_count": 42, "created_at": "..." }]
+  ```
+  `id` here is the same job id from ingestion (`GET /ingest/:jobId`) — use
+  it as `docId` on `/chat` to scope questions to that one document.
 
-A React + TypeScript SPA (Vite, Tailwind) that wraps the auth + two document
+- `DELETE /documents/:jobId` — removes that document's chunks and its job
+  record. Returns `204` on success, `404` if the id doesn't exist or
+  belongs to another user:
+  ```
+  curl.exe -X DELETE http://localhost:3000/documents/<jobId> -H "Authorization: Bearer <accessToken>"
+  ```
+
+## 6. Using the web UI (`frontend/`)
+
+A React + TypeScript SPA (Vite, Tailwind) that wraps the auth + document
 endpoints above in a single chatbot-style page, gated behind login. Layout:
 
 - `frontend/src/api` — fetch calls to the backend (no React).
 - `frontend/src/context/AuthContext.tsx` — session state: current user, the
   in-memory access token, login/register/logout.
-- `frontend/src/hooks` — state/business logic (`useDocumentUpload`, `useChat`, `useHistory`).
+- `frontend/src/hooks` — state/business logic (`useDocumentUpload`,
+  `useDocuments`, `useChat`, `useHistory`).
 - `frontend/src/components` — presentation only (`auth/` has the login and
-  register forms).
+  register forms, `documents/` has the ingested-documents panel).
 - `frontend/src/pages/ChatbotPage.tsx` — the main page once logged in, wires
   everything together.
 
@@ -221,9 +255,15 @@ XSS to grab.
   `GET /ingest/:jobId` every 1.5s), then a banner shows the final result
   (`Ingested N chunks from "..."`) or its error, auto-dismissing after a few
   seconds or dismissible manually.
+- **Your documents** — a panel lists everything you've ingested (filename,
+  chunk count, when) with a delete (✕) button per document; it refreshes
+  automatically once an upload finishes.
 - **Ask a question** — type into the textarea and click "Ask" (or it's
-  disabled while empty/loading). The answer, its sources, and the top
-  similarity score appear in a card above.
+  disabled while empty/loading). A dropdown next to the question box lets
+  you scope the question to one document instead of searching all of them
+  ("All documents" by default). The answer streams in token-by-token as
+  Groq generates it rather than appearing all at once; its sources and the
+  top similarity score appear once it finishes.
 - **History** — every question/answer pair is added to a running list below,
   with the answer cut down to 200 characters and a "Show more" toggle to see
   the full text. History is kept in the browser's `sessionStorage`: it
@@ -235,7 +275,7 @@ retrieve the same top chunk/source with a similar similarity score each
 time — that's expected retrieval behavior, not a bug; more specific,
 content-targeted questions will surface different sources.
 
-## 6. Quick end-to-end check
+## 7. Quick end-to-end check
 
 ```
 cd backend
@@ -247,7 +287,8 @@ curl.exe -c cookies.txt -X POST http://localhost:3000/auth/register -H "Content-
 curl.exe -X POST http://localhost:3000/ingest -H "Authorization: Bearer <accessToken>" -F "file=@sample.pdf"
 # note the returned jobId, then poll until status is "done":
 curl.exe http://localhost:3000/ingest/<jobId> -H "Authorization: Bearer <accessToken>"
-curl.exe -X POST http://localhost:3000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <accessToken>" -d "{\"question\": \"Summarize this document\"}"
+# -N so you see tokens arrive as they stream instead of all at once:
+curl.exe -N -X POST http://localhost:3000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <accessToken>" -d "{\"question\": \"Summarize this document\"}"
 
 # or, instead of curl, use the web UI:
 cd frontend && npm install && npm run dev

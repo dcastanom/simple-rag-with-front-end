@@ -12,8 +12,8 @@ const swaggerSpec = require('./swagger');
 const { requireAuth } = require('./auth/middleware');
 const { router: authRouter } = require('./auth/routes');
 const { initDb, pool } = require('./db');
-const { createIngestJob, getIngestJob, processIngestJob } = require('./ingest');
-const { queryDocuments } = require('./query');
+const { createIngestJob, getIngestJob, processIngestJob, listDocuments, deleteDocument } = require('./ingest');
+const { streamQueryDocuments } = require('./query');
 
 const app = express();
 
@@ -79,16 +79,27 @@ app.get('/docs.json', (req, res) => res.json(swaggerSpec));
  *               type: object
  *               properties:
  *                 status: { type: string, example: ok }
+ *                 memory:
+ *                   type: object
+ *                   properties:
+ *                     rssMb: { type: number }
+ *                     heapUsedMb: { type: number }
  *       503:
  *         description: Unhealthy (DB unreachable)
  */
 app.get('/health', async (req, res) => {
+  const mem = process.memoryUsage();
+  const memory = {
+    rssMb: Math.round(mem.rss / 1024 / 1024),
+    heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+  };
+
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok' });
+    res.json({ status: 'ok', memory });
   } catch (err) {
     req.log.error({ err }, 'Health check failed');
-    res.status(503).json({ status: 'unavailable' });
+    res.status(503).json({ status: 'unavailable', memory });
   }
 });
 
@@ -215,9 +226,87 @@ app.get('/ingest/:jobId', requireAuth, async (req, res) => {
 
 /**
  * @openapi
+ * /documents:
+ *   get:
+ *     summary: List ingested documents
+ *     description: Returns the caller's successfully ingested documents, most recent first.
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/DocumentSummary'
+ *       401:
+ *         description: Missing or invalid access token
+ */
+app.get('/documents', requireAuth, async (req, res) => {
+  try {
+    const documents = await listDocuments(req.user.id);
+    res.json(documents);
+  } catch (err) {
+    req.log.error({ err }, 'Failed to list documents');
+    res.status(500).json({ error: 'Failed to list documents' });
+  }
+});
+
+/**
+ * @openapi
+ * /documents/{jobId}:
+ *   delete:
+ *     summary: Delete an ingested document
+ *     description: Removes the document's chunks and its ingest job record. Only the owner can delete it.
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       204:
+ *         description: Deleted
+ *       400:
+ *         description: Invalid job id format
+ *       401:
+ *         description: Missing or invalid access token
+ *       404:
+ *         description: Document not found (or belongs to another user)
+ */
+app.delete('/documents/:jobId', requireAuth, async (req, res) => {
+  if (!UUID_RE.test(req.params.jobId)) {
+    return res.status(400).json({ error: 'Invalid job id' });
+  }
+
+  try {
+    const deleted = await deleteDocument(req.params.jobId, req.user.id);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    res.status(204).end();
+  } catch (err) {
+    req.log.error({ err }, 'Failed to delete document');
+    res.status(500).json({ error: 'Failed to delete document' });
+  }
+});
+
+/**
+ * @openapi
  * /chat:
  *   post:
  *     summary: Ask a question grounded in your ingested documents
+ *     description: >
+ *       Streams the answer as Server-Sent Events rather than one JSON
+ *       response: repeated `event: token` frames (each `data:` a
+ *       JSON-encoded string fragment) as the answer generates, followed by
+ *       one `event: done` frame with sources/similarity, or `event: error`
+ *       if generation fails after streaming has already started.
  *     tags: [Chat]
  *     security:
  *       - bearerAuth: []
@@ -230,33 +319,52 @@ app.get('/ingest/:jobId', requireAuth, async (req, res) => {
  *             required: [question]
  *             properties:
  *               question: { type: string }
+ *               docId:
+ *                 type: string
+ *                 format: uuid
+ *                 description: >
+ *                   Optional — the id of one document (from GET /documents)
+ *                   to scope the answer to. Omit to search across all of
+ *                   the caller's documents.
  *     responses:
  *       200:
- *         description: Answer grounded in the top matching chunks from the caller's documents
+ *         description: text/event-stream of token/done/error frames (see above)
  *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ChatResponse'
+ *           text/event-stream:
+ *             schema: { type: string }
  *       400:
- *         description: Missing question
+ *         description: Missing question, or invalid docId
  *       401:
  *         description: Missing or invalid access token
  *       429:
  *         description: Rate limit exceeded
  */
 app.post('/chat', requireAuth, chatLimiter, async (req, res) => {
-  const { question } = req.body;
+  const { question, docId } = req.body;
 
   if (!question || typeof question !== 'string') {
     return res.status(400).json({ error: 'question is required' });
   }
 
+  if (docId !== undefined && docId !== null && !UUID_RE.test(docId)) {
+    return res.status(400).json({ error: 'Invalid docId' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
   try {
-    const result = await queryDocuments(question, req.user.id);
-    res.json(result);
+    const result = await streamQueryDocuments(question, req.user.id, docId || null, token => {
+      res.write(`event: token\ndata: ${JSON.stringify(token)}\n\n`);
+    });
+    res.write(`event: done\ndata: ${JSON.stringify(result)}\n\n`);
   } catch (err) {
     req.log.error({ err }, 'Query failed');
-    res.status(500).json({ error: 'Query failed' });
+    res.write(`event: error\ndata: ${JSON.stringify('Query failed')}\n\n`);
+  } finally {
+    res.end();
   }
 });
 

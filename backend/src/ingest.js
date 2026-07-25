@@ -42,6 +42,7 @@ async function getIngestJob(jobId, userId) {
 // chunks with bounded concurrency (rather than one at a time) so a large
 // PDF doesn't take minutes, without overwhelming Gemini's rate limits.
 async function processIngestJob(jobId, userId, buffer, filename) {
+  const jobStart = Date.now();
   try {
     await pool.query(`UPDATE ingest_jobs SET status = 'processing', updated_at = now() WHERE id = $1`, [jobId]);
 
@@ -66,9 +67,17 @@ async function processIngestJob(jobId, userId, buffer, filename) {
       `UPDATE ingest_jobs SET status = 'done', chunk_count = $2, updated_at = now() WHERE id = $1`,
       [jobId, chunks.length]
     );
-    logger.info({ jobId, filename, chunkCount: chunks.length }, 'Ingest job done');
+    const mem = process.memoryUsage();
+    logger.info({
+      jobId,
+      filename,
+      chunkCount: chunks.length,
+      totalMs: Date.now() - jobStart,
+      rssMb: Math.round(mem.rss / 1024 / 1024),
+      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+    }, 'Ingest job done');
   } catch (err) {
-    logger.error({ jobId, filename, err }, 'Ingest job failed, cleaning up partial rows');
+    logger.error({ jobId, filename, err, totalMs: Date.now() - jobStart }, 'Ingest job failed, cleaning up partial rows');
 
     // No partial documents left behind on failure.
     await pool.query(`DELETE FROM documents WHERE job_id = $1`, [jobId]);
@@ -79,4 +88,26 @@ async function processIngestJob(jobId, userId, buffer, filename) {
   }
 }
 
-module.exports = { createIngestJob, getIngestJob, processIngestJob };
+async function listDocuments(userId) {
+  const { rows } = await pool.query(
+    `SELECT id, filename, chunk_count, created_at
+     FROM ingest_jobs WHERE user_id = $1 AND status = 'done'
+     ORDER BY created_at DESC`,
+    [userId]
+  );
+  return rows;
+}
+
+// Deletes a document's chunks and its job record. Both queries are scoped
+// to user_id, same as every other document/job lookup, so one user can
+// never delete another's data even with a guessed job id.
+async function deleteDocument(jobId, userId) {
+  await pool.query(`DELETE FROM documents WHERE job_id = $1 AND user_id = $2`, [jobId, userId]);
+  const { rowCount } = await pool.query(
+    `DELETE FROM ingest_jobs WHERE id = $1 AND user_id = $2`,
+    [jobId, userId]
+  );
+  return rowCount > 0;
+}
+
+module.exports = { createIngestJob, getIngestJob, processIngestJob, listDocuments, deleteDocument };

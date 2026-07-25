@@ -128,9 +128,13 @@ function refreshAccessToken(): Promise<boolean> {
 // failed), not a signal that the access token merely expired.
 const NO_REFRESH_RETRY = new Set(['/auth/login', '/auth/register', '/auth/refresh', '/auth/logout']);
 
-// The core request function. `isRetry` prevents infinite loops — we only
-// ever attempt one refresh-and-retry per original request.
-async function request<T>(path: string, init: RequestInit, isRetry = false): Promise<T> {
+// Does the fetch + the 401-refresh-and-retry dance, but returns the raw
+// Response instead of parsing it — shared by both the JSON path (request,
+// below) and the streaming path (postJsonStream) since only the JSON path
+// wants the body parsed up front; a stream needs its body left untouched.
+// `isRetry` prevents infinite loops — we only ever attempt one
+// refresh-and-retry per original request.
+async function requestRaw(path: string, init: RequestInit, isRetry = false): Promise<Response> {
   const res = await doFetch(path, init);
 
   if (res.status === 401 && !isRetry && !NO_REFRESH_RETRY.has(path)) {
@@ -138,13 +142,18 @@ async function request<T>(path: string, init: RequestInit, isRetry = false): Pro
     // the refresh cookie, then replay the original request exactly once.
     const refreshed = await refreshAccessToken();
     if (refreshed) {
-      return request<T>(path, init, true);
+      return requestRaw(path, init, true);
     }
     // Refresh failed too, meaning there's truly no valid session anymore.
     accessToken = null;
     onUnauthorized?.(); // tells AuthContext to flip the app into "logged out"
   }
 
+  return res;
+}
+
+async function request<T>(path: string, init: RequestInit): Promise<T> {
+  const res = await requestRaw(path, init);
   return parseBody<T>(res);
 }
 
@@ -153,6 +162,10 @@ async function request<T>(path: string, init: RequestInit, isRetry = false): Pro
 export const apiClient = {
   getJson<T>(path: string): Promise<T> {
     return request<T>(path, { method: 'GET' });
+  },
+
+  deleteJson<T>(path: string): Promise<T> {
+    return request<T>(path, { method: 'DELETE' });
   },
 
   postJson<T>(path: string, body: unknown): Promise<T> {
@@ -171,5 +184,20 @@ export const apiClient = {
       method: 'POST',
       body: form,
     });
+  },
+
+  // For endpoints that respond with a stream (e.g. Server-Sent Events)
+  // instead of one JSON body. Same auth/refresh handling as everything
+  // else here, but on success the caller gets the raw Response back to
+  // read `res.body` from — parsing the stream's contents is the calling
+  // feature module's job (client.ts only owns transport + error shape).
+  async postJsonStream(path: string, body: unknown): Promise<Response> {
+    const res = await requestRaw(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) await parseBody(res); // throws ApiError, never returns
+    return res;
   },
 };

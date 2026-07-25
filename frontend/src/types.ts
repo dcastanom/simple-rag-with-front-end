@@ -24,6 +24,13 @@ export interface IngestJobStatus {
   updated_at: string;
 }
 
+export interface DocumentSummary {
+  id: string;
+  filename: string;
+  chunk_count: number | null;
+  created_at: string;
+}
+
 export interface ChatResponse {
   answer: string;
   sources: string[];

@@ -222,34 +222,121 @@ under the Postgres server's `max_connections`.
 ---
 
 ## 13. Not streaming responses
-**Problem**:Right now /chat holds the connection open until Groq finishes generating the full answer, then returns everything at once. On a short question that's fine. On a longer one, the user stares at nothing for a few seconds and wonders if the request hung.
 
-**Fix**: The Groq API supports streaming — add stream: true to the request body and tokens start coming back as they're generated. Piping those through Express with res.write() is maybe 15 minutes of work and the difference in feel is immediate.
+**Problem**: Right now `/chat` holds the connection open until Groq finishes
+generating the full answer, then returns everything at once. On a short
+question that's fine. On a longer one, the user stares at nothing for a few
+seconds and wonders if the request hung.
+
+**Fix**: Groq supports streaming — add `stream: true` to the request body
+and tokens come back incrementally. Backend pipes them to the client as
+Server-Sent Events (`event: token` per chunk, `event: done` with
+sources/similarity once retrieval context is known to be exhausted,
+`event: error` on mid-stream failure). Frontend reads the response body as
+a stream and appends tokens to the answer as they arrive instead of waiting
+for one JSON blob. This replaces the old single-shot `/chat` response
+shape entirely (no parallel non-streaming endpoint kept around).
+
+**Files**: `src/embeddings.js`, `src/query.js`, `src/index.js`,
+`frontend/src/api/client.ts`, `frontend/src/api/chatApi.ts`,
+`frontend/src/hooks/useChat.ts`, `frontend/src/components/chat/*`
+
+**Done when**: asking a question shows the answer appearing token-by-token
+in the UI rather than all at once; a forced failure mid-stream surfaces a
+clean error instead of hanging.
 
 ---
 
-## 14. Metadata filtering
+## 14a. Doc-scoped chat filtering
 
-**problem**: Once you've loaded more than a few documents, queries bleed across everything: ask about the API spec and you'll get chunks from the onboarding guide too.
+**Problem**: Once a user has loaded more than one document, `/chat` queries bleed
+across all of them: ask about the API spec and you'll get chunks from the
+onboarding guide too.
 
-**Fix**: The fix is a metadata JSONB column where you store the document ID on ingest, then add `WHERE metadata->>'doc_id' = $1` to the similarity query. Expose it as an optional body field on `/chat: { "question": "...", "docId": "api-spec-v2" }`. Users get scoped results, and you get much cleaner answers.
+**Fix**: No new column needed — every row in `documents` already carries
+`job_id` (added for #6, indexed via `documents_job_id_idx`), and one
+`job_id` already corresponds to exactly one ingested file per user. Add
+`AND ($3::uuid IS NULL OR job_id = $3)` to the similarity query in
+`queryDocuments`, and accept an optional `docId` body field on `/chat: {
+"question": "...", "docId": "<job_id>" }`. Users get scoped results with no
+migration.
 
-When your corpus grows into the hundreds of documents, look at re-ranking. Vector similarity retrieval is fast but approximate — it finds chunks that are semantically close to the question, not necessarily the ones that most directly answer it.
+**Files**: `src/query.js`, `src/index.js`, `frontend/src/api/chatApi.ts`,
+`frontend/src/hooks/useChat.ts`, `frontend/src/components/chat/ChatComposer.tsx`
 
-The pattern is: retrieve the top 20 by cosine distance, then run a cross-encoder over them to re-score by actual relevance, then take the best 5 from that second pass. LangChain.js has a cross-encoder wrapper if you don't want to implement it yourself.
+**Done when**: a `/chat` call with `docId` set only returns chunks from that
+job; omitting `docId` behaves as before (searches all of the user's docs).
+Frontend gets a small document selector in the chat composer (sourced from
+the same list as #15's panel) so users can scope a question without
+crafting the request by hand.
 
 ---
 
-## 15. Document management 
-**problem**: The ability to list what's ingested, delete a specific file, and re-ingest an updated version.
+## 14b. Re-ranking (deferred, not scheduled)
 
-**fix** A DELETE FROM documents WHERE source = $1 handles the delete case. Add a GET /documents endpoint that queries SELECT DISTINCT source FROM documents and you have a complete enough API for real use.
+**Problem**: Vector similarity retrieval is fast but approximate — it finds
+chunks that are semantically close to the question, not necessarily the
+ones that most directly answer it. This gets worse as a user's corpus grows.
+
+**Fix (future, not part of this pass)**: retrieve the top 20 by cosine
+distance, then run a cross-encoder over them to re-score by actual
+relevance, then take the best 5 from that second pass. LangChain.js has a
+cross-encoder wrapper if you don't want to implement it yourself.
+
+**Why deferred**: adds a new dependency plus extra latency/cost per query,
+and there's no evidence yet that any user's corpus is large enough for
+retrieval precision to be the bottleneck. Revisit if/when it is.
+
+---
+
+## 15. Document management
+
+**Problem**: No way to see what's ingested, delete a specific file, or clean
+up after a bad upload — a real gap now that `/chat` can bleed across
+documents (see #14a).
+
+**Fix**: No new schema needed — `ingest_jobs` already has one row per
+logical document (`filename`, `status`, `chunk_count`, `created_at`) and
+every `documents` row already carries `job_id`. Add `GET /documents`
+(lists the caller's completed jobs) and `DELETE /documents/:jobId` (deletes
+that job's rows from `documents` then the `ingest_jobs` row itself, scoped
+to `user_id` same as every other query here). Frontend gets a small panel
+listing ingested files with a delete action, which also becomes the source
+list for the doc-scoped chat selector from #14a.
+
+**Files**: `src/ingest.js`, `src/index.js`,
+`frontend/src/api/documentsApi.ts`, `frontend/src/hooks/useDocuments.ts`,
+`frontend/src/components/documents/*`, `frontend/src/pages/ChatbotPage.tsx`
+
+**Done when**: `GET /documents` lists ingested files for the caller only;
+`DELETE /documents/:jobId` removes that document's chunks and the job
+record, and returns 404 for another user's job id.
 
 ---
 
 ## 16. Add measurements to the logs
 
-Add measurements like token, memory, latency usage in order to give an idea of what are the costs we might incur when this goes to production. Be creative.
+**Problem**: No visibility into what a `/chat` or `/ingest` call actually
+costs — token usage, latency breakdown, memory footprint — which makes it
+hard to reason about real per-request cost or capacity before this goes to
+production traffic.
+
+**Fix**: Log latency around each external call (`embedText`,
+`generateAnswer`/stream) individually plus the total per `/chat` request;
+log Groq's `usage` (prompt/completion/total tokens — requested via
+`stream_options.include_usage` even in streaming mode) alongside it. Log
+total duration + chunk count per ingest job (already partially there via
+`chunkCount` logging from #4). Surface `process.memoryUsage()` on `/health`
+so it's visible to whatever polls that endpoint, and log a memory snapshot
+at the end of each ingest job to see how concurrency (`INGEST_CONCURRENCY`)
+affects footprint on large PDFs. All additive — no behavior change.
+
+**Files**: `src/embeddings.js`, `src/query.js`, `src/ingest.js`,
+`src/index.js`
+
+**Done when**: a `/chat` call's logs show embed/generate latency and token
+usage; an ingest job's logs show total duration and a memory snapshot;
+`/health` reports current memory usage.
 
 ## Suggested implementation order
 
@@ -264,6 +351,33 @@ Roughly cost-of-delay order — cheap/high-impact first:
 [x] 6. #5 retries/timeouts — before touching ingestion concurrency
 [x] 7. #4 async ingestion, #6 partial-ingestion cleanup — biggest structural
    change, do last once everything else is stable
+[x] 8. #16 measurements in logs — cheap, additive, gives a before/after
+   baseline for the next three changes
+[x] 9. #15 document management — closes a real functionality gap, reuses
+   existing `ingest_jobs`/`job_id` schema, no migration
+[x] 10. #14a doc-scoped chat filtering — fixes a live correctness bug
+   (cross-document bleed for any user with 2+ docs), reuses `job_id`, no
+   migration; #14b re-ranking is deliberately not scheduled (see above)
+[x] 11. #13 streaming `/chat` responses — biggest structural change of this
+   batch (backend protocol change + frontend consumption), done last once
+   the rest is stable and #16's measurement plumbing is in place to
+   instrument it
+
+Notes from implementing 8–11:
+- #13 fully replaced the old single-JSON-response `/chat` with SSE
+  (`event: token` / `event: done` / `event: error`) — there's no
+  non-streaming `/chat` left, and `generateAnswer` in `embeddings.js` was
+  replaced by `generateAnswerStream`. `queryDocuments` in `query.js` became
+  `streamQueryDocuments`, taking an `onToken` callback.
+- Validation (missing `question`, invalid `docId`) still short-circuits as
+  a plain JSON 400 before the SSE headers are sent — only failures that
+  happen after streaming has started become `event: error` frames.
+- All four items were verified against the real backend (real Postgres via
+  the repo's `docker-compose.yml`, real Gemini/Groq calls) with curl plus a
+  Node script that mirrors the frontend's exact SSE-parsing logic — no
+  browser automation tool was available in this environment, so the actual
+  UI was not visually verified; `npm run build` and `tsc --noEmit` both
+  pass and the dev server was left running for manual browser check.
 
 Not included here (deliberately infra-layer, not app-code):
 containerizing the app (Dockerfile), moving secrets to Secrets Manager/SSM,

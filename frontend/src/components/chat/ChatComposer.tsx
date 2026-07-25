@@ -1,20 +1,23 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import type { DocumentSummary } from '../../types';
 
 interface ChatComposerProps {
   loading: boolean;
   error: string | null;
-  onAsk: (question: string) => Promise<unknown>;
+  documents: DocumentSummary[];
+  onAsk: (question: string, docId: string | null) => Promise<unknown>;
 }
 
-export function ChatComposer({ loading, error, onAsk }: ChatComposerProps) {
+export function ChatComposer({ loading, error, documents, onAsk }: ChatComposerProps) {
   const [value, setValue] = useState('');
+  const [docId, setDocId] = useState('');
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const question = value.trim();
     if (!question || loading) return;
-    const result = await onAsk(question);
+    const result = await onAsk(question, docId || null);
     if (result) setValue('');
   };
 
@@ -23,9 +26,26 @@ export function ChatComposer({ loading, error, onAsk }: ChatComposerProps) {
       onSubmit={handleSubmit}
       className="rounded-2xl border border-stone-200 bg-white/60 p-5 shadow-soft dark:border-stone-800 dark:bg-stone-900/60"
     >
-      <h2 className="mb-3 text-sm font-medium text-stone-600 dark:text-stone-300">
-        2. Ask a question
-      </h2>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-medium text-stone-600 dark:text-stone-300">
+          2. Ask a question
+        </h2>
+        {documents.length > 0 && (
+          <select
+            value={docId}
+            onChange={(e) => setDocId(e.target.value)}
+            aria-label="Scope question to a document"
+            className="rounded-lg border border-stone-200 bg-white px-2 py-1 text-xs text-stone-600 outline-none focus:border-accent dark:border-stone-700 dark:bg-stone-950 dark:text-stone-300"
+          >
+            <option value="">All documents</option>
+            {documents.map((doc) => (
+              <option key={doc.id} value={doc.id}>
+                {doc.filename}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
       <textarea
         value={value}
         onChange={(e) => setValue(e.target.value)}

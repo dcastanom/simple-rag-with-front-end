@@ -40,6 +40,15 @@ const options = {
             user: { $ref: '#/components/schemas/User' },
           },
         },
+        DocumentSummary: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', format: 'uuid', description: 'The ingest job id — use this as docId to scope /chat.' },
+            filename: { type: 'string' },
+            chunk_count: { type: 'integer', nullable: true },
+            created_at: { type: 'string', format: 'date-time' },
+          },
+        },
         IngestJobStatus: {
           type: 'object',
           properties: {

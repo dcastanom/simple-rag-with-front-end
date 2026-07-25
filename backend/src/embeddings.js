@@ -48,6 +48,7 @@ async function fetchWithRetry(url, options, label) {
 }
 
 async function embedText(text) {
+  const start = Date.now();
   const res = await fetchWithRetry(
     `${GEMINI_BASE}/gemini-embedding-001:embedContent?key=${GEMINI_KEY}`,
     {
@@ -59,10 +60,23 @@ async function embedText(text) {
   );
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
+
+  // Gemini's embedContent response has no token-usage field, so this is
+  // latency + input size only — still useful to spot slow/oversized calls.
+  logger.info({ label: 'gemini-embed', ms: Date.now() - start, chars: text.length }, 'Embed call completed');
+
   return data.embedding.values;
 }
 
-async function generateAnswer(context, question) {
+const SYSTEM_PROMPT = 'You are a helpful assistant. Answer the question using only the context provided. If the context does not contain enough information, say so clearly.';
+
+// Streams the answer token-by-token via `onToken`, so the caller (an
+// Express route) can forward each piece to the client as it arrives
+// instead of waiting for the full response. `stream_options.include_usage`
+// asks Groq to append a final usage-only chunk before [DONE], same
+// prompt/completion/total token counts the non-streaming call used to log.
+async function generateAnswerStream(context, question, onToken) {
+  const start = Date.now();
   const res = await fetchWithRetry(
     'https://api.groq.com/openai/v1/chat/completions',
     {
@@ -73,23 +87,55 @@ async function generateAnswer(context, question) {
       },
       body: JSON.stringify({
         model: 'llama-3.1-8b-instant',
+        stream: true,
+        stream_options: { include_usage: true },
         messages: [
-          {
-            role: 'system',
-            content: 'You are a helpful assistant. Answer the question using only the context provided. If the context does not contain enough information, say so clearly.',
-          },
-          {
-            role: 'user',
-            content: `Context:\n${context}\n\nQuestion: ${question}`,
-          },
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: `Context:\n${context}\n\nQuestion: ${question}` },
         ],
       }),
     },
-    'groq-chat'
+    'groq-chat-stream'
   );
-  const data = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(data));
-  return data.choices[0].message.content;
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(errBody);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let usage = null;
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 2);
+      if (!rawEvent.startsWith('data:')) continue;
+
+      const payload = rawEvent.slice(5).trim();
+      if (payload === '[DONE]') continue;
+
+      const parsed = JSON.parse(payload);
+      const delta = parsed.choices?.[0]?.delta?.content;
+      if (delta) onToken(delta);
+      if (parsed.usage) usage = parsed.usage;
+    }
+  }
+
+  logger.info({
+    label: 'groq-chat-stream',
+    ms: Date.now() - start,
+    promptTokens: usage?.prompt_tokens,
+    completionTokens: usage?.completion_tokens,
+    totalTokens: usage?.total_tokens,
+  }, 'Generate call completed');
 }
 
-module.exports = { embedText, generateAnswer };
+module.exports = { embedText, generateAnswerStream };
